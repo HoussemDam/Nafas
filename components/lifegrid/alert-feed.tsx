@@ -3,11 +3,15 @@
 import { useEffect, useRef } from 'react'
 import {
   Ambulance,
+  BatteryLow,
   CheckCircle2,
+  CircleSlash,
   MessageSquare,
+  Navigation,
   PhoneCall,
   Siren,
   TriangleAlert,
+  Undo2,
   UserCheck,
   Zap,
   type LucideIcon,
@@ -16,17 +20,21 @@ import { formatClock } from '@/lib/lifegrid/calculations'
 import type { AlertEvent, AlertEventKind } from '@/lib/lifegrid/types'
 
 const KIND_STYLE: Record<AlertEventKind, { icon: LucideIcon; className: string }> = {
+  outage: { icon: Zap, className: 'text-warning' },
+  outage_restored: { icon: CheckCircle2, className: 'text-safe' },
   samu: { icon: Siren, className: 'text-danger' },
   critical: { icon: TriangleAlert, className: 'text-danger' },
+  battery: { icon: BatteryLow, className: 'text-warning' },
   caregiver: { icon: PhoneCall, className: 'text-warning' },
   family: { icon: MessageSquare, className: 'text-info' },
-  cut: { icon: Zap, className: 'text-warning' },
-  restored: { icon: CheckCircle2, className: 'text-safe' },
   dispatch: { icon: Ambulance, className: 'text-info' },
-  arrived: { icon: UserCheck, className: 'text-safe' },
+  enroute: { icon: Navigation, className: 'text-info' },
+  onscene: { icon: UserCheck, className: 'text-safe' },
+  returning: { icon: Undo2, className: 'text-muted-foreground' },
+  busy: { icon: CircleSlash, className: 'text-danger' },
 }
 
-const VISIBLE_EVENTS = 6
+const VISIBLE_EVENTS = 10
 
 export function AlertFeed({ events }: { events: AlertEvent[] }) {
   const listRef = useRef<HTMLOListElement>(null)
@@ -39,7 +47,7 @@ export function AlertFeed({ events }: { events: AlertEvent[] }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-card">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Alert feed</h2>
+        <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Oxygen alert feed</h2>
         <span className="font-mono text-[11px] text-muted-foreground">{events.length} events logged</span>
       </div>
       <ol

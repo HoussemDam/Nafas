@@ -1,160 +1,367 @@
-import { CITY_REGION, recompute } from "./calculations"
-import { createInitialPatients } from "./patients"
-import type { AlertEvent, AlertEventKind, Patient, SimulationState } from "./types"
+import { recompute } from "./calculations"
+import { distanceKm, pointAlongRoute, routeLength, schematicRoute } from "./geo"
+import { createInitialPatients, INITIAL_OUTAGE_MINUTES } from "./patients"
+import type {
+  AlertEvent,
+  AlertEventKind,
+  AlertLevel,
+  Ambulance,
+  LatLng,
+  OutageZone,
+  Patient,
+  SimulationState,
+} from "./types"
 
-export const TICK_MS = 10_000
-const MAX_EVENTS = 40
-const RESTORE_CHANCE = 0.05
-const NEW_CUT_CHANCE = 0.03
+/** One simulation tick = one simulated minute. */
+export const TICK_MS = 6_000
 
-const MACHINE_SHORT: Record<string, string> = {
-  "Oxygen Concentrator": "O2",
-  "Home Ventilator": "Ventilator",
-  "Dialysis Machine": "Dialysis",
-  "Infusion Pump": "Infusion",
-  "CPAP Machine": "CPAP",
-  Nebulizer: "Nebulizer",
-}
+/** Demo parameter: share of monitored patients the scenario targets as affected. Not a real-world statistic. */
+export const TARGET_AFFECTED_RATIO = 0.425
+
+const MAX_EVENTS = 50
+const MAX_ACTIVE_OUTAGES = 2
+const NEW_OUTAGE_CHANCE = 0.08
+const AMBULANCE_KM_PER_MIN = 0.7
+const MINUTES_ON_SCENE = 3
+const AUTO_DISPATCH_SUPPORT_MINUTES = 10
+const NEAR_OUTAGE_BUFFER_KM = 1.2
+
+type NewEvent = Omit<AlertEvent, "id">
 
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min
+const pad = (n: number) => String(n).padStart(2, "0")
+const pos = (p: { lat: number; lng: number }): LatLng => [p.lat, p.lng]
 
-function who(p: Patient) {
-  return `${p.name} (${p.city})`
+const BASES: { id: string; baseName: string; at: LatLng }[] = [
+  { id: "AMB-01", baseName: "Sfax Centre station", at: [34.743, 10.755] },
+  { id: "AMB-02", baseName: "Sfax North station", at: [34.776, 10.74] },
+  { id: "AMB-03", baseName: "Sfax South station", at: [34.711, 10.73] },
+  { id: "AMB-04", baseName: "Sfax West station", at: [34.752, 10.701] },
+]
+
+function idleAmbulance(b: (typeof BASES)[number]): Ambulance {
+  return {
+    id: b.id,
+    baseName: b.baseName,
+    baseLat: b.at[0],
+    baseLng: b.at[1],
+    lat: b.at[0],
+    lng: b.at[1],
+    status: "available",
+    assignedPatientId: null,
+    destination: null,
+    route: [],
+    routeLengthKm: 0,
+    progressKm: 0,
+    eta: null,
+    minutesOnScene: 0,
+  }
 }
 
-function escalationEvent(p: Patient): { kind: AlertEventKind; message: string } | null {
-  const machine = MACHINE_SHORT[p.machine]
-  switch (p.alertLevel) {
-    case "SAMU":
-      return { kind: "samu", message: `SAMU alerted — ${who(p)} — ${machine} — ${p.batteryMinutesRemaining} min battery` }
-    case "caregiver":
-      return { kind: "caregiver", message: `Caregiver notified — ${who(p)} — ${machine} — ${p.batteryPercent}%` }
-    case "family":
-      return { kind: "family", message: `Family SMS sent — ${who(p)} — ${machine} — power cut detected` }
-    default:
-      return null
+function etaFor(a: Ambulance) {
+  return Math.max(1, Math.ceil((a.routeLengthKm - a.progressKm) / AMBULANCE_KM_PER_MIN))
+}
+
+function startMission(a: Ambulance, destination: LatLng, progressKm = 0): Ambulance {
+  const route = schematicRoute(pos(a), destination)
+  const length = routeLength(route)
+  const progress = Math.min(progressKm, length * 0.9)
+  const [lat, lng] = pointAlongRoute(route, progress)
+  const next = { ...a, route, routeLengthKm: length, progressKm: progress, destination, lat, lng, minutesOnScene: 0 }
+  return { ...next, eta: etaFor(next) }
+}
+
+function zoneFromPatients(
+  id: string,
+  name: string,
+  members: Patient[],
+  startedAt: number,
+  elapsed: number,
+  duration: number,
+): OutageZone {
+  const centerLat = members.reduce((s, p) => s + p.lat, 0) / members.length
+  const centerLng = members.reduce((s, p) => s + p.lng, 0) / members.length
+  const farthest = Math.max(...members.map((p) => distanceKm([centerLat, centerLng], pos(p))))
+  return {
+    id,
+    name,
+    centerLat,
+    centerLng,
+    radiusKm: Math.max(1.2, Number((farthest + 0.5).toFixed(1))),
+    startedAt,
+    durationMinutes: duration,
+    elapsedMinutes: elapsed,
+    severity: members.length >= 4 ? "high" : "moderate",
+    status: "active",
+    affectedPatients: members.map((p) => p.id),
   }
+}
+
+function markNearOutage(patients: Patient[], outages: OutageZone[], iso: string): Patient[] {
+  return patients.map((p) => {
+    const near =
+      p.powerStatus === "on" &&
+      outages.some((o) => distanceKm([o.centerLat, o.centerLng], pos(p)) <= o.radiusKm + NEAR_OUTAGE_BUFFER_KM)
+    return near === p.nearOutage ? p : recompute({ ...p, nearOutage: near }, iso)
+  })
+}
+
+const ESCALATION: Record<Exclude<AlertLevel, "none">, { kind: AlertEventKind; text: string }> = {
+  family: { kind: "family", text: "Family SMS sent" },
+  caregiver: { kind: "caregiver", text: "Caregivers called" },
+  SAMU: { kind: "samu", text: "SAMU Sfax alerted" },
 }
 
 export function createInitialState(nowMs: number): SimulationState {
   const iso = new Date(nowMs).toISOString()
-  const patients = createInitialPatients(iso)
+  let patients = createInitialPatients(iso)
+  const minute = 60_000
 
-  const seeded: Omit<AlertEvent, "id">[] = []
-  for (const p of patients) {
-    if (p.powerStatus !== "cut") continue
-    seeded.push({
-      time: nowMs - p.minutesWithoutPower * 60_000,
-      kind: "cut",
-      message: `Power cut detected — ${who(p)} — ${MACHINE_SHORT[p.machine]}`,
-    })
-    const esc = escalationEvent(p)
-    if (esc) {
-      const lag = p.alertLevel === "SAMU" ? 3 : p.alertLevel === "caregiver" ? 1 : 0
-      seeded.push({ time: nowMs - Math.max(0, p.minutesWithoutPower - lag) * 60_000, ...esc })
-    }
+  const clusterA = patients.filter((p) => p.outageId === "OUT-001")
+  const clusterB = patients.filter((p) => p.outageId === "OUT-002")
+  const aMin = INITIAL_OUTAGE_MINUTES["OUT-001"]
+  const bMin = INITIAL_OUTAGE_MINUTES["OUT-002"]
+  const outages = [
+    zoneFromPatients("OUT-001", "Sfax North — Sakiet Ezzit", clusterA, nowMs - aMin * minute, aMin, 40),
+    zoneFromPatients("OUT-002", "Thyna", clusterB, nowMs - bMin * minute, bMin, 24),
+  ]
+
+  const ambulances = BASES.map(idleAmbulance)
+  const firstTarget = patients.find((p) => p.id === "PT-001")!
+  const amb2Index = ambulances.findIndex((a) => a.id === "AMB-02")
+  const mission = startMission(
+    { ...ambulances[amb2Index], status: "en_route", assignedPatientId: firstTarget.id },
+    pos(firstTarget),
+    2.2,
+  )
+  ambulances[amb2Index] = mission
+  patients = patients.map((p) =>
+    p.id === firstTarget.id
+      ? recompute({ ...p, responderDispatched: true, responderId: mission.id, responderETA: mission.eta }, iso)
+      : p,
+  )
+  patients = markNearOutage(patients, outages, iso)
+
+  const seeded: NewEvent[] = []
+  for (const [zone, members, mins] of [
+    [outages[0], clusterA, aMin],
+    [outages[1], clusterB, bMin],
+  ] as const) {
+    const start = nowMs - mins * minute
+    seeded.push({ time: start, kind: "outage", message: `Local outage detected — ${zone.name} — ${members.length} oxygen patients affected` })
+    seeded.push({ time: start + 30_000, kind: "family", message: `Family SMS sent — ${zone.id} — ${members.length} oxygen patients` })
+    seeded.push({ time: start + 2 * minute, kind: "caregiver", message: `Caregivers called — ${zone.id} — ${members.length} oxygen patients` })
+    seeded.push({ time: start + 4 * minute, kind: "samu", message: `SAMU Sfax alerted — ${zone.id} — ${members.length} oxygen patients` })
   }
-  const restored = patients.find((p) => p.id === "PT-010")
-  if (restored) {
-    seeded.push({
-      time: nowMs - 6 * 60_000,
-      kind: "restored",
-      message: `Power restored — ${who(restored)} — ${restored.machine}`,
-    })
+  for (const p of patients.filter((p) => p.status === "danger")) {
+    seeded.push({ time: nowMs - 2 * minute, kind: "critical", message: `Critical oxygen patient — ${p.name} — battery ${p.batteryPercent}%` })
   }
+  seeded.push({ time: nowMs - 3 * minute, kind: "dispatch", message: `Ambulance AMB-02 dispatched — ${firstTarget.name} (${firstTarget.area})` })
+  seeded.push({ time: nowMs - 2.5 * minute, kind: "enroute", message: `AMB-02 en route — ETA ${pad(mission.eta ?? 0)} min` })
 
   const events = seeded
     .sort((a, b) => b.time - a.time)
-    .slice(0, 12)
     .map((e, i, arr) => ({ ...e, id: arr.length - i }))
 
-  return { patients, events, nextEventId: events.length + 1, lastTick: nowMs }
+  return { patients, outages, ambulances, events, nextEventId: events.length + 1, nextOutageNumber: 3, lastTick: nowMs }
 }
 
 export function simulateTick(state: SimulationState, nowMs: number): SimulationState {
   const iso = new Date(nowMs).toISOString()
-  const newEvents: Omit<AlertEvent, "id">[] = []
+  const newEvents: NewEvent[] = []
   const push = (kind: AlertEventKind, message: string) => newEvents.push({ time: nowMs, kind, message })
 
-  let patients = state.patients.map((p) => {
-    const prev = p
-    let next: Patient
+  let patients = state.patients
+  let outages = state.outages.map((o) => ({ ...o, elapsedMinutes: o.elapsedMinutes + 1 }))
 
-    if (p.powerStatus === "cut") {
-      next = recompute(
-        {
-          ...p,
-          batteryPercent: p.batteryPercent - randInt(1, 3),
-          minutesWithoutPower: p.minutesWithoutPower + 1,
-        },
-        iso,
-      )
-      if (next.alertLevel !== prev.alertLevel) {
-        const esc = escalationEvent(next)
-        if (esc) push(esc.kind, esc.message)
-      }
-      if (prev.status !== "danger" && next.status === "danger") {
-        push("critical", `Battery critical — ${who(next)} — ${next.batteryPercent}% · ${next.batteryMinutesRemaining} min left`)
-      }
-      if (prev.batteryPercent > 0 && next.batteryPercent === 0) {
-        push("critical", `Backup depleted — ${who(next)} — ${next.machine} offline`)
-      }
-    } else {
-      next = recompute({ ...p, batteryPercent: p.batteryPercent + randInt(1, 3) }, iso)
+  // 1. Zone-level restoration: the whole outage area comes back together.
+  for (const zone of outages.filter((o) => o.elapsedMinutes >= o.durationMinutes)) {
+    const restored = patients.filter((p) => p.outageId === zone.id)
+    patients = patients.map((p) =>
+      p.outageId === zone.id
+        ? recompute({ ...p, powerStatus: "on", outageId: null, minutesWithoutPower: 0, oxygenBackup: "none" }, iso)
+        : p,
+    )
+    push("outage_restored", `Power restored — ${zone.name} — ${restored.length} oxygen patients`)
+  }
+  outages = outages.filter((o) => o.elapsedMinutes < o.durationMinutes)
+
+  // 2. Battery depletion + escalation for patients inside active outages.
+  const escalations = new Map<string, { level: Exclude<AlertLevel, "none">; count: number }>()
+  patients = patients.map((prev) => {
+    if (prev.powerStatus !== "cut") {
+      return prev.batteryPercent < 100 ? recompute({ ...prev, batteryPercent: prev.batteryPercent + randInt(1, 3) }, iso) : prev
     }
-
-    if (next.responderDispatched && next.responderETA !== null) {
-      const eta = Math.max(0, next.responderETA - 1)
-      if (eta === 0 && next.responderETA > 0) {
-        push("arrived", `Responder on site — ${who(next)}`)
-      }
-      next = { ...next, responderETA: eta }
+    const next = recompute(
+      { ...prev, batteryPercent: prev.batteryPercent - randInt(1, 2), minutesWithoutPower: prev.minutesWithoutPower + 1 },
+      iso,
+    )
+    if (next.alertLevel !== prev.alertLevel && next.alertLevel !== "none" && next.outageId) {
+      const key = `${next.outageId}:${next.alertLevel}`
+      const entry = escalations.get(key) ?? { level: next.alertLevel, count: 0 }
+      escalations.set(key, { ...entry, count: entry.count + 1 })
+    }
+    if (prev.status !== "danger" && next.status === "danger") {
+      push("critical", `Critical oxygen patient — ${next.name} — battery ${next.batteryPercent}%`)
+    } else if (next.oxygenBackup === "none" && prev.batteryPercent > 15 && next.batteryPercent <= 15) {
+      push("battery", `Oxygen battery low — ${next.name} — ${next.batteryPercent}%`)
+    }
+    if (prev.batteryPercent > 0 && next.batteryPercent === 0 && next.oxygenBackup === "none") {
+      push("critical", `Oxygen supply emergency — ${next.name} — concentrator offline`)
     }
     return next
   })
-
-  if (Math.random() < RESTORE_CHANCE) {
-    const cut = patients.filter((p) => p.powerStatus === "cut")
-    if (cut.length > 0) {
-      const target = cut[randInt(0, cut.length - 1)]
-      patients = patients.map((p) =>
-        p.id === target.id ? recompute({ ...p, powerStatus: "on", minutesWithoutPower: 0 }, iso) : p,
-      )
-      push("restored", `Power restored — ${who(target)} — ${target.machine}`)
-    }
+  for (const [key, { level, count }] of escalations) {
+    const zoneId = key.split(":")[0]
+    push(ESCALATION[level].kind, `${ESCALATION[level].text} — ${zoneId} — ${count} oxygen patient${count > 1 ? "s" : ""}`)
   }
 
-  if (Math.random() < NEW_CUT_CHANCE) {
-    const stable = patients.filter((p) => p.status === "stable")
-    if (stable.length > 0) {
-      const target = stable[randInt(0, stable.length - 1)]
+  // 3. Ambulance movement along simulated routes.
+  const ambulances = state.ambulances.map((a) => {
+    if (a.status === "en_route") {
+      const justLeft = a.progressKm === 0
+      const progressKm = Math.min(a.routeLengthKm, a.progressKm + AMBULANCE_KM_PER_MIN)
+      const [lat, lng] = pointAlongRoute(a.route, progressKm)
+      const moved = { ...a, progressKm, lat, lng }
+      const target = patients.find((p) => p.id === a.assignedPatientId)
+      if (progressKm >= a.routeLengthKm) {
+        if (target) {
+          patients = patients.map((p) =>
+            p.id === target.id
+              ? recompute({ ...p, responderETA: 0, oxygenBackup: p.powerStatus === "cut" ? "cylinder" : "none" }, iso)
+              : p,
+          )
+          push("onscene", `${a.id} on scene — ${target.name} — portable O2 cylinder connected`)
+        }
+        return { ...moved, status: "on_scene" as const, eta: 0, minutesOnScene: 0 }
+      }
+      const eta = etaFor(moved)
+      if (justLeft) push("enroute", `${a.id} en route — ETA ${pad(eta)} min`)
+      patients = patients.map((p) => (p.id === a.assignedPatientId ? { ...p, responderETA: eta } : p))
+      return { ...moved, eta }
+    }
+    if (a.status === "on_scene") {
+      if (a.minutesOnScene + 1 < MINUTES_ON_SCENE) return { ...a, minutesOnScene: a.minutesOnScene + 1 }
+      push("returning", `${a.id} returning to ${a.baseName}`)
+      return startMission({ ...a, status: "returning" as const, assignedPatientId: null }, [a.baseLat, a.baseLng])
+    }
+    if (a.status === "returning") {
+      const progressKm = Math.min(a.routeLengthKm, a.progressKm + AMBULANCE_KM_PER_MIN)
+      if (progressKm >= a.routeLengthKm) return idleAmbulance(BASES.find((b) => b.id === a.id)!)
+      const [lat, lng] = pointAlongRoute(a.route, progressKm)
+      const moved = { ...a, progressKm, lat, lng }
+      return { ...moved, eta: etaFor(moved) }
+    }
+    return a
+  })
+
+  // 4. Occasionally a new localized outage hits a cluster of nearby patients.
+  let nextOutageNumber = state.nextOutageNumber
+  if (outages.length < MAX_ACTIVE_OUTAGES && Math.random() < NEW_OUTAGE_CHANCE) {
+    const zone = pickNewOutage(patients, nextOutageNumber, nowMs)
+    if (zone) {
+      nextOutageNumber++
+      outages = [...outages, zone]
       patients = patients.map((p) =>
-        p.id === target.id
-          ? recompute({ ...p, powerStatus: "cut", minutesWithoutPower: 0, responderDispatched: false, responderETA: null }, iso)
+        zone.affectedPatients.includes(p.id)
+          ? recompute(
+              {
+                ...p,
+                powerStatus: "cut",
+                outageId: zone.id,
+                minutesWithoutPower: 0,
+                oxygenBackup: "none",
+                responderDispatched: false,
+                responderId: null,
+                responderETA: null,
+              },
+              iso,
+            )
           : p,
       )
-      push("cut", `Power cut detected — ${who(target)} — ${MACHINE_SHORT[target.machine]}`)
-      push("family", `Family SMS sent — ${who(target)} — ${MACHINE_SHORT[target.machine]} — power cut detected`)
+      push("outage", `Local outage detected — ${zone.name} — ${zone.affectedPatients.length} oxygen patients affected`)
     }
   }
 
-  return appendEvents({ ...state, patients, lastTick: nowMs }, newEvents)
+  patients = markNearOutage(patients, outages, iso)
+
+  let next: SimulationState = { ...state, patients, outages, ambulances, nextOutageNumber, lastTick: nowMs }
+  next = appendEvents(next, newEvents)
+
+  // 5. Auto-dispatch the most urgent unassigned patient when oxygen support is nearly exhausted.
+  const urgent = next.patients
+    .filter(
+      (p) =>
+        p.powerStatus === "cut" &&
+        p.oxygenBackup === "none" &&
+        !p.responderDispatched &&
+        p.batteryMinutesRemaining <= AUTO_DISPATCH_SUPPORT_MINUTES,
+    )
+    .sort((a, b) => b.priorityScore - a.priorityScore)[0]
+  if (urgent && next.ambulances.some((a) => a.status === "available")) {
+    next = dispatchResponder(next, urgent.id, nowMs, true)
+  }
+
+  return next
 }
 
-export function dispatchResponder(state: SimulationState, id: string, nowMs: number): SimulationState {
-  const target = state.patients.find((p) => p.id === id)
+function pickNewOutage(patients: Patient[], number: number, nowMs: number): OutageZone | null {
+  const total = patients.length
+  const cutCount = patients.filter((p) => p.powerStatus === "cut").length
+  const powered = patients.filter((p) => p.powerStatus === "on")
+  const radiusKm = 1.6 + Math.random() * 1.2
+
+  let best: Patient[] = []
+  for (const center of powered) {
+    const members = powered.filter((p) => distanceKm(pos(center), pos(p)) <= radiusKm)
+    if (members.length > best.length || (members.length === best.length && Math.random() < 0.5)) best = members
+  }
+  if (best.length < 2) return null
+  const cap = Math.round(total * (TARGET_AFFECTED_RATIO + 0.1)) - cutCount
+  if (cap < 2) return null
+  best = best.slice(0, cap)
+
+  const id = `OUT-${String(number).padStart(3, "0")}`
+  return zoneFromPatients(id, best[0].area, best, nowMs, 0, randInt(18, 32))
+}
+
+export function dispatchResponder(state: SimulationState, patientId: string, nowMs: number, auto = false): SimulationState {
+  const target = state.patients.find((p) => p.id === patientId)
   if (!target || target.responderDispatched) return state
-  const rural = CITY_REGION[target.city] === "Rural"
-  const eta = rural ? randInt(22, 40) : randInt(8, 18)
-  const patients = state.patients.map((p) =>
-    p.id === id ? { ...p, responderDispatched: true, responderETA: eta } : p,
+
+  const nearest = state.ambulances
+    .filter((a) => a.status === "available")
+    .sort((a, b) => distanceKm(pos(a), pos(target)) - distanceKm(pos(b), pos(target)))[0]
+
+  if (!nearest) {
+    return appendEvents(state, [
+      { time: nowMs, kind: "busy", message: `All ambulances busy — ${target.name} queued for next available unit` },
+    ])
+  }
+
+  const mission = startMission({ ...nearest, status: "en_route", assignedPatientId: target.id }, pos(target))
+  const iso = new Date(nowMs).toISOString()
+  return appendEvents(
+    {
+      ...state,
+      ambulances: state.ambulances.map((a) => (a.id === mission.id ? mission : a)),
+      patients: state.patients.map((p) =>
+        p.id === target.id
+          ? recompute({ ...p, responderDispatched: true, responderId: mission.id, responderETA: mission.eta }, iso)
+          : p,
+      ),
+    },
+    [
+      {
+        time: nowMs,
+        kind: "dispatch",
+        message: `${auto ? "Auto-dispatch: " : ""}Ambulance ${mission.id} dispatched — ${target.name} (${target.area}) — ETA ${pad(mission.eta ?? 0)} min`,
+      },
+    ],
   )
-  return appendEvents({ ...state, patients }, [
-    { time: nowMs, kind: "dispatch", message: `Responder dispatched — ${who(target)} — ETA ${eta} min` },
-  ])
 }
 
-function appendEvents(state: SimulationState, events: Omit<AlertEvent, "id">[]): SimulationState {
+function appendEvents(state: SimulationState, events: NewEvent[]): SimulationState {
   if (events.length === 0) return state
   let nextId = state.nextEventId
   const withIds = events.map((e) => ({ ...e, id: nextId++ })).reverse()

@@ -2,14 +2,13 @@
 
 import { useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, ArrowUpDown, Ambulance, CheckCircle2, Eye, Zap } from 'lucide-react'
-import { CITY_REGION } from '@/lib/lifegrid/calculations'
 import type { AlertLevel, Patient, PatientStatus } from '@/lib/lifegrid/types'
 
 type SortKey =
   | 'id'
   | 'name'
-  | 'city'
-  | 'machine'
+  | 'area'
+  | 'outage'
   | 'status'
   | 'power'
   | 'battery'
@@ -23,8 +22,8 @@ const ALERT_RANK: Record<AlertLevel, number> = { SAMU: 3, caregiver: 2, family: 
 const SORTERS: Record<SortKey, (p: Patient) => number | string> = {
   id: (p) => p.id,
   name: (p) => p.name,
-  city: (p) => p.city,
-  machine: (p) => p.machineCriticality,
+  area: (p) => p.area,
+  outage: (p) => p.outageId ?? '',
   status: (p) => STATUS_RANK[p.status],
   power: (p) => (p.powerStatus === 'cut' ? 1 : 0),
   battery: (p) => p.batteryPercent,
@@ -36,15 +35,17 @@ const SORTERS: Record<SortKey, (p: Patient) => number | string> = {
 const COLUMNS: { key: SortKey; label: string; className?: string }[] = [
   { key: 'id', label: '#' },
   { key: 'name', label: 'Patient' },
-  { key: 'city', label: 'City' },
-  { key: 'machine', label: 'Machine' },
+  { key: 'area', label: 'Area' },
+  { key: 'outage', label: 'Outage zone' },
   { key: 'status', label: 'Status' },
   { key: 'power', label: 'Power' },
-  { key: 'battery', label: 'Battery', className: 'w-44' },
-  { key: 'timeCut', label: 'Time Cut' },
+  { key: 'battery', label: 'O2 battery', className: 'w-44' },
+  { key: 'timeCut', label: 'Without power' },
   { key: 'priority', label: 'Priority' },
   { key: 'alert', label: 'Alert' },
 ]
+
+const STATUS_LABEL: Record<PatientStatus, string> = { danger: 'CRITICAL', warning: 'AT RISK', stable: 'STABLE' }
 
 const STATUS_BADGE: Record<PatientStatus, string> = {
   danger: 'border-danger/50 bg-danger/15 text-danger',
@@ -100,10 +101,11 @@ export function PatientTable({ patients, selectedId, onDispatch, onDetails }: Pa
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div>
           <h2 id="patient-table-title" className="text-sm font-semibold">
-            Patient triage queue
+            Oxygen patient triage queue
           </h2>
           <p className="text-xs text-muted-foreground">
-            Auto-sorted every sync · click a column header to change order
+            Priority = 30 outage base + 0.4 × battery deficit + 0.8 × minutes without power (max 30) + low-support
+            bonus − 10 if ambulance assigned
           </p>
         </div>
         <span className="font-mono text-xs text-muted-foreground">
@@ -159,40 +161,26 @@ export function PatientTable({ patients, selectedId, onDispatch, onDetails }: Pa
                     <div className="text-xs text-muted-foreground">{p.age} yrs</div>
                   </td>
                   <td className="px-3 py-2.5">
-                    <div>{p.city}</div>
-                    <span
-                      className={`text-[10px] font-semibold uppercase tracking-wider ${
-                        CITY_REGION[p.city] === 'Rural' ? 'text-warning' : 'text-muted-foreground'
-                      }`}
-                    >
-                      {CITY_REGION[p.city]}
-                    </span>
+                    <div>{p.area}</div>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Greater Sfax</span>
                   </td>
                   <td className="px-3 py-2.5">
-                    <div>{p.machine}</div>
-                    <div className="mt-0.5 flex gap-1" aria-label={`Criticality ${p.machineCriticality} of 3`}>
-                      {[1, 2, 3].map((n) => (
-                        <span
-                          key={n}
-                          className={`size-1.5 rounded-full ${
-                            n <= p.machineCriticality
-                              ? p.machineCriticality === 3
-                                ? 'bg-danger'
-                                : p.machineCriticality === 2
-                                  ? 'bg-warning'
-                                  : 'bg-safe'
-                              : 'bg-border'
-                          }`}
-                        />
-                      ))}
-                    </div>
+                    {p.outageId ? (
+                      <span className="rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 font-mono text-[11px] text-warning">
+                        {p.outageId}
+                      </span>
+                    ) : p.nearOutage ? (
+                      <span className="text-xs text-warning">Near outage</span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
                   </td>
                   <td className="px-3 py-2.5">
                     <span
                       className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[11px] font-bold tracking-wider ${STATUS_BADGE[p.status]}`}
                     >
                       <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
-                      {p.status.toUpperCase()}
+                      {STATUS_LABEL[p.status]}
                     </span>
                   </td>
                   <td className="px-3 py-2.5">
@@ -225,7 +213,9 @@ export function PatientTable({ patients, selectedId, onDispatch, onDetails }: Pa
                     </div>
                     {p.powerStatus === 'cut' && (
                       <div className="mt-0.5 text-[11px] text-muted-foreground">
-                        {p.batteryMinutesRemaining} min backup left
+                        {p.oxygenBackup === 'cylinder'
+                          ? 'Portable O2 cylinder on site'
+                          : `${p.batteryMinutesRemaining} min oxygen support left`}
                       </div>
                     )}
                   </td>
@@ -245,8 +235,10 @@ export function PatientTable({ patients, selectedId, onDispatch, onDetails }: Pa
                       {p.responderDispatched ? (
                         <span className="inline-flex items-center gap-1 rounded-md bg-info/15 px-2.5 py-1.5 text-xs font-medium text-blue-300">
                           <Ambulance className="size-3.5" aria-hidden="true" />
-                          {p.responderETA === 0 ? 'On site' : `ETA ${p.responderETA}m`}
+                          {p.responderId} · {p.responderETA === 0 ? 'On scene' : `ETA ${p.responderETA}m`}
                         </span>
+                      ) : p.powerStatus === 'on' ? (
+                        <span className="px-2.5 text-xs text-muted-foreground">Grid OK</span>
                       ) : (
                         <button
                           type="button"

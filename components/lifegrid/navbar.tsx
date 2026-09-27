@@ -35,14 +35,17 @@ export function Navbar({ patientCount, dangerCount, lastTick }: NavbarProps) {
             <span className="lg-live-dot size-2 rounded-full bg-danger" aria-hidden="true" />
             LIVE
           </span>
+          <span className="hidden rounded-md border border-border px-2 py-0.5 text-[10px] font-semibold tracking-widest text-muted-foreground sm:inline">
+            SIMULATION
+          </span>
         </div>
 
         <div className="hidden flex-col items-center md:flex">
           <h1 className="text-sm font-semibold tracking-wide text-foreground">
-            Tunisia Home Patient Monitoring System
+            Sfax Oxygen Patient Emergency Operations
           </h1>
           <p className="text-xs text-muted-foreground">
-            Tunisia — {patientCount} Patients · STEG outage alert cascade
+            Greater Sfax, Tunisia · {patientCount} home oxygen patients · Simulated demo data
           </p>
         </div>
 
@@ -66,11 +69,11 @@ export function Navbar({ patientCount, dangerCount, lastTick }: NavbarProps) {
               dangerCount > 0 ? 'border-danger/50 bg-danger/10 text-danger' : 'border-border text-muted-foreground'
             }`}
             role="status"
-            aria-label={`${dangerCount} active danger alerts`}
+            aria-label={`${dangerCount} critical oxygen patients`}
           >
             <Bell className="size-4" aria-hidden="true" />
             <span className="tabular-nums">{dangerCount}</span>
-            <span className="hidden lg:inline">Active Alerts</span>
+            <span className="hidden lg:inline">Critical</span>
           </div>
         </div>
       </div>
