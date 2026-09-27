@@ -1,0 +1,183 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-safe: var(--safe);
+  --color-info: var(--info);
+  --color-surface: var(--surface);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+:root {
+  color-scheme: dark;
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+  --card: #1e293b;
+  --card-foreground: #f1f5f9;
+  --popover: #1e293b;
+  --popover-foreground: #f1f5f9;
+  --primary: #3b82f6;
+  --primary-foreground: #f8fafc;
+  --secondary: #273449;
+  --secondary-foreground: #f1f5f9;
+  --muted: #273449;
+  --muted-foreground: #94a3b8;
+  --accent: #273449;
+  --accent-foreground: #f1f5f9;
+  --destructive: #ef4444;
+  --border: #334155;
+  --input: #334155;
+  --ring: #3b82f6;
+  --surface: #172033;
+
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --safe: #22c55e;
+  --info: #3b82f6;
+
+  --radius: 0.625rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}
+
+/* ---------- Animations ---------- */
+@keyframes lg-pulse-border {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0.55), inset 0 0 0 1px rgb(239 68 68 / 0.7); }
+  50% { box-shadow: 0 0 0 6px rgb(239 68 68 / 0), inset 0 0 0 1px rgb(239 68 68 / 0.25); }
+}
+.lg-pulse-border { animation: lg-pulse-border 1.8s ease-in-out infinite; }
+
+@keyframes lg-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.lg-live-dot { animation: lg-live 1.2s ease-in-out infinite; }
+
+@keyframes lg-slide-in {
+  from { opacity: 0; transform: translateY(-10px); background-color: rgb(59 130 246 / 0.15); }
+  to { opacity: 1; transform: translateY(0); background-color: transparent; }
+}
+.lg-slide-in { animation: lg-slide-in 0.6s ease-out; }
+
+/* ---------- Map markers ---------- */
+.lg-marker {
+  position: relative;
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  border: 2px solid #0f172a;
+  transition: background-color 0.4s ease;
+}
+.lg-marker.lg-danger { background: var(--danger); width: 18px; height: 18px; }
+.lg-marker.lg-warning { background: var(--warning); }
+.lg-marker.lg-stable { background: var(--safe); }
+.lg-marker.lg-selected { outline: 2px solid #f1f5f9; outline-offset: 2px; }
+
+.lg-marker.lg-danger::before,
+.lg-marker.lg-danger::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  background: rgb(239 68 68 / 0.6);
+  animation: lg-ripple 2s ease-out infinite;
+  z-index: -1;
+}
+.lg-marker.lg-danger::after { animation-delay: 1s; }
+
+@keyframes lg-ripple {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(3.6); opacity: 0; }
+}
+
+/* ---------- Ambulance markers ---------- */
+.lg-amb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9999px;
+  border: 2px solid #0f172a;
+  background: var(--info);
+  color: #f8fafc;
+  box-shadow: 0 0 0 2px rgb(15 23 42 / 0.65), 0 2px 10px rgb(0 0 0 / 0.55);
+  z-index: 30;
+}
+.lg-amb svg { width: 18px; height: 18px; }
+.lg-amb-on_scene { background: var(--safe); }
+.lg-amb-returning,
+.lg-amb-available { background: #475569; }
+
+.lg-amb-en_route { animation: lg-amb-pulse 1.6s ease-in-out infinite; }
+
+@keyframes lg-amb-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgb(15 23 42 / 0.65), 0 0 0 0 rgb(59 130 246 / 0.6); }
+  50% { box-shadow: 0 0 0 2px rgb(15 23 42 / 0.65), 0 0 0 9px rgb(59 130 246 / 0); }
+}
+
+
+/* ---------- Leaflet dark theming ---------- */
+.lg-map .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(200deg) brightness(0.85) contrast(0.9) saturate(0.6);
+}
+.lg-map.leaflet-container { background: #0b1222; font-family: inherit; }
+.lg-map .leaflet-control-attribution {
+  background: rgb(15 23 42 / 0.8);
+  color: #94a3b8;
+}
+.lg-map .leaflet-control-attribution a { color: #93c5fd; }
+.lg-map .leaflet-bar a {
+  background: #1e293b;
+  color: #f1f5f9;
+  border-bottom-color: #334155;
+}
+.lg-map .leaflet-bar a:hover { background: #273449; }
+.lg-map .leaflet-popup-content-wrapper,
+.lg-map .leaflet-popup-tip {
+  background: #1e293b;
+  color: #f1f5f9;
+  border: 1px solid #334155;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);
+}
+.lg-map .leaflet-popup-content { margin: 14px 16px; font-size: 12.5px; line-height: 1.5; }
+.lg-map .leaflet-popup-close-button { color: #94a3b8 !important; }
